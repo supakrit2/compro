@@ -10,13 +10,16 @@ Binary files (all little-endian, fixed-length records, 20-byte header each):
     data/members.dat    members         <I 30s 15s I I>
     data/parking.dat    parking records <I I I 20s 20s f I>
     data/history.dat    work history    <I I I I I I f>
-Text file:
-    data/report.txt     summary report (UTF-8, written in the selected language)
+Text files (UTF-8, written in the selected language):
+    report_summary.txt
+    report_members.txt
+    report_parking.txt
+    Reports are stored outside the data/ folder.
 
 Deleted vehicles/members are kept as tombstones (status = 0). Their slots form
 a free-list (rebuilt on start-up) and are reused by the next Add.
 Data stored in the files is language independent (e.g. vehicle type is always
-stored as "Car"/"Motorcycle"); only what is displayed is translated.
+stored as "Car"; only what is displayed is translated.
 
 Usage:
     python parking_lot.py                    # language menu, then interactive menu
@@ -42,11 +45,13 @@ from datetime import datetime, timedelta
 APP_VERSION = "1.0"
 ENDIAN = "<"                      # little-endian, no padding
 TOTAL_SLOTS = 50
+# ช่องจอดทั้งหมดสำหรับรถยนต์: 1-50
+CAR_SLOT_START, CAR_SLOT_END = 1, TOTAL_SLOTS
 RATE_PER_HOUR = 10.0              # THB per started hour
 MIN_FEE = 10.0                    # THB
 TIME_FMT = "%Y-%m-%d %H:%M:%S" 
    # 19 chars -> fits in 20s
-VEHICLE_TYPES = ("Car", "Motorcycle")
+VEHICLE_TYPES = ("Car",)
 PLATE_RE = r"[0-9A-Za-zก-๙ \-]+"
 PHONE_RE = r"\+?[0-9\-]{9,15}"
 
@@ -60,6 +65,8 @@ VEHICLE_FIELDS = [("vehicle_id", "I"), ("plate", "20s"), ("vehicle_type", "10s")
                   ("brand", "15s"), ("status", "I")]
 MEMBER_FIELDS = [("member_id", "I"), ("name", "30s"), ("phone", "15s"),
                  ("vehicle_id", "I"), ("status", "I")]
+# ความสัมพันธ์สมาชิก-รถ: สมาชิก 1 คนมีรถได้สูงสุด 1 คัน
+MEMBER_VEHICLE_FIELDS = [("link_id", "I"), ("member_id", "I"), ("vehicle_id", "I"), ("status", "I")]
 PARKING_FIELDS = [("parking_id", "I"), ("vehicle_id", "I"), ("slot_no", "I"),
                   ("time_in", "20s"), ("time_out", "20s"), ("fee", "f"), ("status", "I")]
 HISTORY_FIELDS = [("ts", "I"), ("op_code", "I"), ("vehicle_id", "I"), ("slot_no", "I"),
@@ -145,9 +152,11 @@ EN = {
     "err_vehicle_parked_delete": "Vehicle is currently parked - process the exit first",
     "err_already_parked": "Vehicle is already parked",
     "err_lot_full": "Parking lot is full",
-    "err_slot_unavailable": "Slot {slot} is not available",
+    "err_slot_unavailable": "Slot {slot} is not available for this vehicle type",
     "err_not_parked": "Vehicle is not currently parked",
+    "err_member_vehicle_limit": "One member can have only 1 vehicle",
     "err_cancelled": "Cancelled",
+    "err_vehicle_already_owned": "Vehicle {id} is already linked to member {member}",
     # --- file / start-up errors ---
     "err_incomplete_header": "{path}: incomplete header",
     "err_bad_magic": "{path}: bad magic/version (not a valid data file)",
@@ -165,6 +174,8 @@ EN = {
     "ok_member_deleted": "OK: member deleted",
     "free_slots_info": "Free slots: {free}/{total}",
     "available_slots": "Available slots: {slots}",
+    "parking_zone_car": "Car slots: 1-50",
+    "err_wrong_vehicle_zone": "Slot {slot} is not for {type}",
     "ok_parked": "OK: parked in slot {slot} at {time}",
     "ok_exit": "OK: slot {slot} released. In {time_in} / Out {time_out}",
     "fee_line": "Fee: {fee} THB",
@@ -197,7 +208,6 @@ EN = {
     "yes": "Yes",
     "no": "No",
     "type_Car": "Car",
-    "type_Motorcycle": "Motorcycle",
     "op_1": "ADD",
     "op_2": "UPDATE",
     "op_3": "DELETE",
@@ -222,6 +232,9 @@ EN = {
     "r_total_slots": "Total Parking Slots",
     "r_occupied": "Occupied Slots",
     "r_available_slots": "Available Slots",
+    "r_car_slots": "Car Slots",
+    "r_car_occupied": "Occupied Car Slots",
+    "slot_unit": "slots",
     "sec_parking_records": "Parking Records",
     "r_total_parking_records": "Total Parking Records",
     "r_completed_parking": "Completed Parking",
@@ -229,8 +242,8 @@ EN = {
     "r_min": "Min",
     "r_max": "Max",
     "r_avg": "Avg",
-    "sec_by_type": "Vehicles by Type (Active only)",
-    "sec_by_brand": "Vehicles by Brand (Active only)",
+    "sec_by_type": "Vehicles by Type",
+    "sec_by_brand": "Vehicles by Brand",
     "sec_members": "Members",
     "r_total_members": "Total Members",
     "r_active_members": "Active Members",
@@ -290,7 +303,9 @@ TH = {
     "err_parking_not_found": "ไม่พบประวัติการจอดรหัส {id}", "err_plate_exists": "เลขทะเบียน {plate} มีอยู่ในระบบแล้ว",
     "err_vehicle_parked_delete": "รถคันนี้กำลังจอดอยู่ กรุณานำรถออกก่อนจึงจะลบได้",
     "err_already_parked": "รถคันนี้กำลังจอดอยู่แล้ว", "err_lot_full": "ลานจอดรถเต็ม ไม่มีช่องว่าง",
-    "err_slot_unavailable": "ช่องจอด {slot} ไม่ว่าง กรุณาเลือกช่องอื่น", "err_not_parked": "รถคันนี้ไม่ได้กำลังจอดอยู่",
+    "err_slot_unavailable": "ช่องจอด {slot} ไม่ว่างหรือไม่ใช่โซนของรถประเภทนี้ กรุณาเลือกช่องอื่น",
+    "parking_zone_car": "โซนรถยนต์: ช่อง 1-50",
+    "err_wrong_vehicle_zone": "ช่อง {slot} ไม่ใช่โซนสำหรับ{type}", "err_not_parked": "รถคันนี้ไม่ได้กำลังจอดอยู่",
     "err_cancelled": "ยกเลิกการทำรายการแล้ว",
     "err_incomplete_header": "{path}: ส่วนหัวไฟล์ไม่สมบูรณ์", "err_bad_magic": "{path}: รูปแบบหรือเวอร์ชันไฟล์ไม่ถูกต้อง",
     "err_record_size": "{path}: ขนาดข้อมูล {actual} ไม่ตรงกับที่กำหนด {expected}",
@@ -313,14 +328,14 @@ TH = {
     "col_status": "สถานะ", "col_parked": "กำลังจอด", "col_name": "ชื่อ", "col_phone": "เบอร์โทรศัพท์",
     "col_time_in": "เวลาเข้า", "col_time_out": "เวลาออก", "col_fee": "ค่าจอด (บาท)",
     "status_active": "ใช้งาน", "status_deleted": "ลบแล้ว", "status_parked": "กำลังจอด", "status_done": "เสร็จสิ้น",
-    "yes": "ใช่", "no": "ไม่ใช่", "type_Car": "รถยนต์", "type_Motorcycle": "รถจักรยานยนต์",
     "op_1": "เพิ่มข้อมูล", "op_2": "แก้ไขข้อมูล", "op_3": "ลบข้อมูล", "op_4": "ดูข้อมูล", "op_5": "รถเข้า", "op_6": "รถออก",
     "rpt_title": "รายงานสรุประบบจัดการลานจอดรถ", "rpt_generated": "วันที่และเวลาที่สร้างรายงาน", "rpt_version": "เวอร์ชันโปรแกรม",
     "rpt_endian": "รูปแบบการจัดเก็บไบต์", "rpt_encoding": "รูปแบบการเข้ารหัส", "little_endian": "Little-Endian",
     "fixed_length_utf8": "UTF-8 (ข้อมูลความยาวคงที่)", "sec_summary": "1. สรุปข้อมูลรถ",
     "r_total_vehicles": "จำนวนรถทั้งหมด", "r_active_vehicles": "จำนวนรถที่ใช้งานอยู่", "r_deleted_vehicles": "จำนวนรถที่ลบแล้ว",
     "r_currently_parked": "จำนวนรถที่กำลังจอด", "r_available_vehicles": "จำนวนรถที่ไม่ได้จอด",
-    "sec_lot": "2. สรุปการใช้ช่องจอด", "r_total_slots": "จำนวนช่องจอดทั้งหมด", "r_occupied": "จำนวนช่องที่ถูกใช้งาน", "r_available_slots": "จำนวนช่องว่าง",
+    "sec_lot": "2. สรุปการใช้ช่องจอด", "r_total_slots": "จำนวนช่องจอดทั้งหมด", "r_occupied": "จำนวนช่องที่ถูกใช้งาน", "r_available_slots": "จำนวนช่องว่าง", "r_car_slots": "ช่องจอดรถยนต์", "r_car_occupied": "ช่องจอดรถยนต์ที่ถูกใช้งาน",
+    "slot_unit": "ช่อง",
     "sec_parking_records": "3. สรุปประวัติการจอด", "r_total_parking_records": "จำนวนประวัติการจอดทั้งหมด",
     "r_completed_parking": "จำนวนรายการที่จอดเสร็จสิ้น", "sec_fee": "4. สถิติค่าจอดรถ (เฉพาะรายการที่เสร็จสิ้น)",
     "r_min": "ค่าจอดต่ำสุด", "r_max": "ค่าจอดสูงสุด", "r_avg": "ค่าจอดเฉลี่ย",
@@ -366,6 +381,11 @@ def bi(key):
 
 
 EN.update({
+    "add_vehicle_title": "Add Vehicle",
+    "vehicle_linked_to_member": "Vehicle linked to your member account successfully.",
+    "choose_my_vehicle": "เลือกคันที่ต้องการใช้งาน",
+    "p_choose_vehicle": "เลือกหมายเลขรถ: ",
+    "my_vehicles_title": "รถของฉัน",
     "rpt_members_title": "Parking Lot Management System - Members Report",
     "rpt_parking_title": "Parking Lot Management System - Parking Records Report",
     "rpt_summary_end": "End of Report - Summary",
@@ -382,6 +402,11 @@ EN.update({
     "r_times": "{n} times",
 })
 TH.update({
+    "add_vehicle_title": "เพิ่มรถ",
+    "vehicle_linked_to_member": "เชื่อมรถเข้ากับบัญชีสมาชิกเรียบร้อยแล้ว",
+    "choose_my_vehicle": "เลือกคันที่ต้องการใช้งาน",
+    "p_choose_vehicle": "เลือกหมายเลขรถ: ",
+    "my_vehicles_title": "รถของฉัน",
     "rpt_members_title": "รายงานสมาชิก ระบบจัดการลานจอดรถ",
     "rpt_parking_title": "รายงานประวัติการจอด ระบบจัดการลานจอดรถ",
     "rpt_summary_end": "สรุปท้ายรายงาน",
@@ -608,31 +633,139 @@ class ParkingSystem:
     def __init__(self, data_dir):
         os.makedirs(data_dir, exist_ok=True)
         p = lambda name: os.path.join(data_dir, name)
-        self.report_path = p("report_summary.txt")
-        self.report_members_path = p("report_members.txt")
-        self.report_parking_path = p("report_parking.txt")
-        self.vehicles = Table(p("vehicles.dat"), b"VEHC", VEHICLE_FIELDS, "vehicle_id", 1001, True)
+        # Binary data อยู่ใน data/ แต่ Report เก็บไว้ข้างนอก data/
+        report_dir = os.path.dirname(os.path.abspath(data_dir))
+        self.report_path = os.path.join(report_dir, "report_summary.txt")
+        self.report_members_path = os.path.join(report_dir, "report_members.txt")
+        self.report_parking_path = os.path.join(report_dir, "report_parking.txt")
+        self.vehicles = Table(p("vehicles.dat"), b"VEHC", VEHICLE_FIELDS, "vehicle_id", 1, True)
         self.members = Table(p("members.dat"), b"MEMB", MEMBER_FIELDS, "member_id", 5001, True)
+        self.member_vehicles = Table(p("member_vehicles.dat"), b"MVEH", MEMBER_VEHICLE_FIELDS, "link_id", 1, True)
         self.parking = Table(p("parking.dat"), b"PARK", PARKING_FIELDS, "parking_id", 1, False)
         self.history = Table(p("history.dat"), b"HIST", HISTORY_FIELDS)
+        self._migrate_primary_vehicle_links()
 
     def close(self):
-        for t_ in (self.vehicles, self.members, self.parking, self.history):
+        for t_ in (self.vehicles, self.members, self.member_vehicles, self.parking, self.history):
             t_.close()
+
+    def _migrate_primary_vehicle_links(self):
+        """สร้าง/ซ่อมความสัมพันธ์จาก members.dat ให้เหลือรถหลัก 1 คันต่อสมาชิก."""
+        # ข้อมูลเก่าอาจมี link ซ้ำหรือมีมากกว่า 1 คันต่อสมาชิก
+        # เก็บ link ที่ใช้งานตัวแรกไว้ และปิด link ที่เกิน/รถซ้ำกับสมาชิกอื่น
+        seen_members = set()
+        seen_vehicles = set()
+        for r in self.member_vehicles.records():
+            if r["status"] != 1:
+                continue
+            mid, vid = r["member_id"], r["vehicle_id"]
+            if mid in seen_members or vid in seen_vehicles:
+                r["status"] = 0
+                self.member_vehicles.update(r)
+            else:
+                try:
+                    self.active_member(mid)
+                    self.active_vehicle(vid)
+                    seen_members.add(mid)
+                    seen_vehicles.add(vid)
+                except AppError:
+                    r["status"] = 0
+                    self.member_vehicles.update(r)
+
+        # เติม link จาก members.dat สำหรับข้อมูลเก่าที่ไม่มี link
+        for m in self.members.records():
+            vid = m.get("vehicle_id", 0)
+            if m["status"] != 1 or not vid or m["member_id"] in seen_members or vid in seen_vehicles:
+                continue
+            try:
+                self.active_vehicle(vid)
+                self.member_vehicles.insert({"link_id": 0, "member_id": m["member_id"], "vehicle_id": vid, "status": 1})
+                seen_members.add(m["member_id"])
+                seen_vehicles.add(vid)
+            except AppError:
+                pass
+
+    def member_vehicle_ids(self, mid):
+        """คืนรายการรถของสมาชิก โดยกติกาปัจจุบันคือ 1 สมาชิก = 1 รถ."""
+        ids = []
+        for r in self.member_vehicles.records():
+            if r["status"] == 1 and r["member_id"] == mid and r["vehicle_id"] not in ids:
+                try:
+                    self.active_vehicle(r["vehicle_id"])
+                    ids.append(r["vehicle_id"])
+                except AppError:
+                    pass
+        m = self.members.get(mid)
+        if m and m["status"] == 1 and m.get("vehicle_id") and m["vehicle_id"] not in ids:
+            try:
+                self.active_vehicle(m["vehicle_id"])
+                ids.insert(0, m["vehicle_id"])
+            except AppError:
+                pass
+        return ids[:1]
+
+    def _vehicle_owner(self, vid, exclude_mid=None):
+        """คืน member_id ของเจ้าของรถที่ยัง active ถ้ามี."""
+        for r in self.member_vehicles.records():
+            if r["status"] == 1 and r["vehicle_id"] == vid and r["member_id"] != exclude_mid:
+                try:
+                    self.active_member(r["member_id"])
+                    return r["member_id"]
+                except AppError:
+                    pass
+        for m in self.members.records():
+            if m["status"] == 1 and m.get("vehicle_id") == vid and m["member_id"] != exclude_mid:
+                return m["member_id"]
+        return None
+
+    def _deactivate_member_links(self, mid, keep_vid=None):
+        for r in self.member_vehicles.records():
+            if r["status"] == 1 and r["member_id"] == mid and (keep_vid is None or r["vehicle_id"] != keep_vid):
+                r["status"] = 0
+                self.member_vehicles.update(r)
+
+    def add_member_vehicle(self, mid, vid):
+        self.active_member(mid)
+        self.active_vehicle(vid)
+        ids = self.member_vehicle_ids(mid)
+        if vid in ids:
+            return
+        if ids:
+            raise AppError("err_member_vehicle_limit")
+        owner = self._vehicle_owner(vid, exclude_mid=mid)
+        if owner is not None:
+            raise AppError("err_vehicle_already_owned", id=vid, member=owner)
+        self.member_vehicles.insert({"link_id": 0, "member_id": mid, "vehicle_id": vid, "status": 1})
 
     def _log(self, op, vid=0, slot=0, status=0, parked=0, fee=0.0, now=None):
         now = now or datetime.now()
         self.history.insert({"ts": int(now.timestamp()), "op_code": op, "vehicle_id": vid,
                              "slot_no": slot, "status_after": status,
                              "is_parked_after": parked, "fee_after_thb": fee})
+        # อัปเดต Report ทันทีหลังจากข้อมูลถูกบันทึกลง Binary แล้ว
+        # ทำให้ report ทั้ง 3 ไฟล์เป็นข้อมูลล่าสุดตลอดเวลา
+        try:
+            generate_report(self)
+        except Exception as e:
+            print(f"  ! ไม่สามารถอัปเดต Report แบบเรียลไทม์ได้: {e}")
 
     # ---- helpers ----
     def parked_map(self):
         return {r["vehicle_id"]: r for r in self.parking.records() if r["status"] == 1}
 
-    def free_slots(self):
+    def slot_range_for_type(self, vtype=None):
+        # ระบบนี้รองรับเฉพาะรถยนต์ และใช้ช่องจอด 1-50 ทั้งหมด
+        return range(CAR_SLOT_START, CAR_SLOT_END + 1)
+
+    def slot_zone_label(self, slot):
+        if CAR_SLOT_START <= slot <= CAR_SLOT_END:
+            return t("parking_zone_car")
+        return ""
+
+    def free_slots(self, vtype=None):
         used = {r["slot_no"] for r in self.parking.records() if r["status"] == 1}
-        return [s for s in range(1, TOTAL_SLOTS + 1) if s not in used]
+        allowed = self.slot_range_for_type(vtype) if vtype else range(1, TOTAL_SLOTS + 1)
+        return [s for s in allowed if s not in used]
 
     def active_vehicle(self, vid):
         rec = self.vehicles.get(vid)
@@ -681,6 +814,14 @@ class ParkingSystem:
         if vid in self.parked_map():
             raise AppError("err_vehicle_parked_delete")
         self.vehicles.delete(vid)
+        for r in self.member_vehicles.records():
+            if r["status"] == 1 and r["vehicle_id"] == vid:
+                r["status"] = 0
+                self.member_vehicles.update(r)
+        for m in self.members.records():
+            if m["status"] == 1 and m.get("vehicle_id") == vid:
+                m["vehicle_id"] = 0
+                self.members.update(m)
         self._log(OP_DELETE, vid, 0, 0, 0)
 
     def view_vehicle(self, vid):
@@ -694,46 +835,63 @@ class ParkingSystem:
     # ---- members ----
     def add_member(self, name, phone, vid, now=None):
         self.active_vehicle(vid)
+        if self._vehicle_owner(vid) is not None:
+            raise AppError("err_vehicle_already_owned", id=vid, member=self._vehicle_owner(vid))
         rec = self.members.insert({"member_id": 0, "name": name, "phone": phone,
                                    "vehicle_id": vid, "status": 1})
+        try:
+            self.add_member_vehicle(rec["member_id"], vid)
+        except Exception:
+            self.members.delete(rec["member_id"])
+            raise
         self._log(OP_ADD, vid, 0, 1, 1 if vid in self.parked_map() else 0, 0.0, now)
         return rec
 
     def update_member(self, mid, name=None, phone=None, vid=None):
         rec = self.active_member(mid)
-        if vid is not None:
-            self.active_vehicle(vid)
-            rec["vehicle_id"] = vid
+        old_vid = rec.get("vehicle_id", 0)
+        new_vid = old_vid if vid is None else vid
+        self.active_vehicle(new_vid)
+        owner = self._vehicle_owner(new_vid, exclude_mid=mid)
+        if owner is not None:
+            raise AppError("err_vehicle_already_owned", id=new_vid, member=owner)
         if name:
             rec["name"] = name
         if phone:
             rec["phone"] = phone
+        rec["vehicle_id"] = new_vid
         self.members.update(rec)
-        self._log(OP_UPDATE, rec["vehicle_id"], 0, 1, 1 if rec["vehicle_id"] in self.parked_map() else 0)
+        self._deactivate_member_links(mid, keep_vid=new_vid)
+        self.add_member_vehicle(mid, new_vid)
+        self._log(OP_UPDATE, new_vid, 0, 1, 1 if new_vid in self.parked_map() else 0)
         return rec
 
     def delete_member(self, mid):
         rec = self.active_member(mid)
         self.members.delete(mid)
+        self._deactivate_member_links(mid)
         self._log(OP_DELETE, rec["vehicle_id"], 0, 0, 0)
 
     # ---- parking ----
     def enter(self, vid, slot=None, now=None):
         now = now or datetime.now()
-        self.active_vehicle(vid)
+        vehicle = self.active_vehicle(vid)
 
-        # Read active parking records once instead of calling parked_map() and
-        # free_slots() separately. This avoids scanning parking.dat twice.
+        # ช่องจอดรถยนต์ทั้งหมด: 1-50
         active_records = [r for r in self.parking.records() if r["status"] == 1]
         if any(r["vehicle_id"] == vid for r in active_records):
             raise AppError("err_already_parked")
 
         used_slots = {r["slot_no"] for r in active_records}
-        free = [s for s in range(1, TOTAL_SLOTS + 1) if s not in used_slots]
+        allowed = list(self.slot_range_for_type(vehicle["vehicle_type"]))
+        free = [s for s in allowed if s not in used_slots]
         if not free:
             raise AppError("err_lot_full")
         if slot is None:
             slot = free[0]
+        elif slot not in allowed:
+            raise AppError("err_wrong_vehicle_zone", slot=slot,
+                            type=type_label(vehicle["vehicle_type"]))
         elif slot not in free:
             raise AppError("err_slot_unavailable", slot=slot)
 
@@ -824,6 +982,16 @@ def member_rows(members):
             for m in members]
 
 
+def member_report_rows(s, members):
+    """แสดงรถของสมาชิกทุกคัน โดยรองรับรถ 1 คัน"""
+    rows = []
+    for m in members:
+        ids = s.member_vehicle_ids(m["member_id"])
+        vehicle_text = ", ".join(str(v) for v in ids) if ids else "-"
+        rows.append([m["member_id"], m["name"], m["phone"], vehicle_text, status_label(m["status"])])
+    return rows
+
+
 def parking_rows(records):
     return [[r["parking_id"], r["vehicle_id"], r["slot_no"], r["time_in"], r["time_out"] or "-",
              f"{r['fee']:.2f}", t("status_parked") if r["status"] == 1 else t("status_done")]
@@ -872,10 +1040,14 @@ def build_report(s, now, with_table=True, with_header=True):
         (t("r_deleted_vehicles"), len(vehicles) - len(active)),
         (t("r_currently_parked"), len(parked_active)),
         (t("r_available_vehicles"), len(active) - len(parked_active))])
+    car_slots = set(range(CAR_SLOT_START, CAR_SLOT_END + 1))
+    occupied_slots = {r["slot_no"] for r in parked.values()}
     out += section(t("sec_lot"), [
         (t("r_total_slots"), TOTAL_SLOTS),
         (t("r_occupied"), len(parked)),
-        (t("r_available_slots"), TOTAL_SLOTS - len(parked))])
+        (t("r_available_slots"), TOTAL_SLOTS - len(parked)),
+        (t("r_car_slots"), f"{CAR_SLOT_START}-{CAR_SLOT_END} ({len(car_slots)} {t('slot_unit')})"),
+        (t("r_car_occupied"), len(occupied_slots & car_slots))])
     out += section(t("sec_parking_records"), [
         (t("r_total_parking_records"), len(parking)),
         (t("r_completed_parking"), len(completed)),
@@ -932,7 +1104,7 @@ def build_members_report(s, now):
         (t("rpt_encoding"), t("fixed_length_utf8")),
     ])
     out += ["", t("sec_member_by_type"), ""]
-    out += [text_table(mem_head(), member_rows(members)), ""]
+    out += [text_table(mem_head(), member_report_rows(s, members)), ""]
     out += section(t("sec_member_summary"), [
         (t("r_total_members"), len(members)),
         (t("r_active_members"), len(active_members)),
@@ -985,7 +1157,7 @@ def build_parking_report(s, now):
         if vtype is not None:
             revenue_by_type[vtype] = revenue_by_type.get(vtype, 0.0) + r["fee"]
     out += section(t("sec_revenue_type"), [
-        (type_label(k), f"{v:.2f}") for k, v in sorted(revenue_by_type.items())
+        (type_label(k), f"{revenue_by_type.get(k, 0.0):.2f}") for k in VEHICLE_TYPES
     ])
     out += [t("rpt_summary_end"), ""]
     return "\n".join(out)
@@ -1080,14 +1252,12 @@ def choose_entity():
 def pick_type(allow_blank=False):
     c = choose(t("ttl_vehicle_type"), [type_label(v) for v in VEHICLE_TYPES])
     if c == 0:
-        if allow_blank:
-            return None
-        raise AppError("err_cancelled")
+        return None
     return VEHICLE_TYPES[c - 1]
 
 
-def pick_brand(blank_ok=False):
-    """Choose a common brand by number; keep free-text fallback for Other."""
+def pick_brand(blank_ok=False, vtype=None):
+    """Choose a brand list appropriate to the selected vehicle type."""
     options = VEHICLE_BRANDS
     print(f"\n-- {t('m_brand_select')} --")
     for i, brand in enumerate(options, 1):
@@ -1100,9 +1270,7 @@ def pick_brand(blank_ok=False):
     while True:
         c = ask_int(t("select"), 0, len(options))
         if c == 0:
-            if blank_ok:
-                return None
-            raise AppError("err_cancelled")
+            return None
         brand = options[c - 1]
         if brand == "Other":
             return ask_text(t("p_brand_other"), 15, blank_ok=False)
@@ -1125,7 +1293,11 @@ def menu_add(s):
     if c == 1:
         plate = ask_plate()
         vtype = pick_type()
-        brand = pick_brand()
+        if vtype is None:
+            return
+        brand = pick_brand(vtype=vtype)
+        if brand is None:
+            return
         rec = s.add_vehicle(plate, vtype, brand)
         print("  " + t("ok_vehicle_added", id=rec["vehicle_id"]))
     elif c == 2:
@@ -1145,7 +1317,7 @@ def menu_update(s):
                        brand=cur["brand"]))
         plate = ask_plate(blank_ok=True)
         vtype = pick_type(allow_blank=True)
-        brand = pick_brand(blank_ok=True)
+        brand = pick_brand(blank_ok=True, vtype=vtype or cur["vehicle_type"])
         s.update_vehicle(vid, plate, vtype, brand)
         print("  " + t("ok_vehicle_updated"))
     elif c == 2:
@@ -1265,8 +1437,11 @@ def menu_view(s):
 
 def menu_entry(s):
     vid = ask_int(t("p_vehicle_id"), 1)
-    free = s.free_slots()
-    print("  " + t("free_slots_info", free=len(free), total=TOTAL_SLOTS))
+    vehicle = s.active_vehicle(vid)
+    free = s.free_slots(vehicle["vehicle_type"])
+    print("  " + t("parking_zone_car"))
+    print("  " + t("free_slots_info", free=len(free), total=len(list(s.slot_range_for_type(vehicle["vehicle_type"])))) )
+    print("  " + t("available_slots", slots=", ".join(map(str, free))))
     slot = ask_int(t("p_slot"), 1, TOTAL_SLOTS, blank_ok=True)
     rec = s.enter(vid, slot)
     print("  " + t("ok_parked", slot=rec["slot_no"], time=rec["time_in"]))
@@ -1294,35 +1469,53 @@ def get_current_member(s):
     return s.active_member(current_member_id)
 
 
-def user_vehicle(s):
+def user_vehicles(s):
     member = get_current_member(s)
-    vid = member["vehicle_id"]
-    if not vid:
+    ids = s.member_vehicle_ids(member["member_id"])
+    vehicles = []
+    for vid in ids:
+        try:
+            vehicles.append(s.active_vehicle(vid))
+        except AppError:
+            pass
+    return member, vehicles
+
+
+def choose_user_vehicle(s):
+    member, vehicles = user_vehicles(s)
+    if not vehicles:
         raise AppError("user_no_vehicle")
-    return member, s.active_vehicle(vid)
+    if len(vehicles) == 1:
+        return member, vehicles[0]
+    print("\n" + t("choose_my_vehicle"))
+    for i, v in enumerate(vehicles, 1):
+        parked = s.parked_map().get(v["vehicle_id"])
+        state = f" | ช่องจอด {parked['slot_no']}" if parked else " | ไม่ได้จอด"
+        print(f"{i}) {v['vehicle_id']} - {v['plate']} - {type_label(v['vehicle_type'])} - {v['brand']}{state}")
+    n = ask_int(t("p_choose_vehicle"), 1, len(vehicles))
+    return member, vehicles[n - 1]
 
 
 def menu_user_view(s):
-    member, vehicle = user_vehicle(s)
-    parked = s.parked_map().get(vehicle["vehicle_id"])
-    print(text_table(veh_head(), vehicle_rows([vehicle], s.parked_map())))
+    member, vehicles = user_vehicles(s)
+    if not vehicles:
+        raise AppError("user_no_vehicle")
     print(text_table(mem_head(), member_rows([member])))
-    if parked:
-        print(text_table(prk_head(), parking_rows([parked])))
-    else:
-        history = [r for r in s.parking.records() if r["vehicle_id"] == vehicle["vehicle_id"]]
-        if history:
-            print(text_table(prk_head(), parking_rows(history[-10:])))
+    print("\n" + t("my_vehicles_title"))
+    print(text_table(veh_head(), vehicle_rows(vehicles, s.parked_map())))
+    for vehicle in vehicles:
+        parked = s.parked_map().get(vehicle["vehicle_id"])
+        if parked:
+            print(text_table(prk_head(), parking_rows([parked])))
 
 
 def menu_user_entry(s):
-    _member, vehicle = user_vehicle(s)
-    free = s.free_slots()
+    _member, vehicle = choose_user_vehicle(s)
+    free = s.free_slots(vehicle["vehicle_type"])
     if not free:
         raise AppError("err_lot_full")
-
-    # User must choose a free parking slot instead of silently taking slot 1.
-    print("  " + t("free_slots_info", free=len(free), total=TOTAL_SLOTS))
+    print("  " + t("parking_zone_car"))
+    print("  " + t("free_slots_info", free=len(free), total=len(list(s.slot_range_for_type(vehicle["vehicle_type"])))) )
     print("  " + t("available_slots", slots=", ".join(map(str, free))))
     slot = ask_int(t("p_slot"), 1, TOTAL_SLOTS)
     rec = s.enter(vehicle["vehicle_id"], slot)
@@ -1330,7 +1523,7 @@ def menu_user_entry(s):
 
 
 def menu_user_exit(s):
-    _member, vehicle = user_vehicle(s)
+    _member, vehicle = choose_user_vehicle(s)
     rec = s.leave(vehicle["vehicle_id"])
     print("  " + t("ok_exit", slot=rec["slot_no"], time_in=rec["time_in"],
                    time_out=rec["time_out"]))
@@ -1339,12 +1532,50 @@ def menu_user_exit(s):
 
 
 def menu_user_history(s):
-    _member, vehicle = user_vehicle(s)
+    _member, vehicle = choose_user_vehicle(s)
     records = [r for r in s.parking.records() if r["vehicle_id"] == vehicle["vehicle_id"]]
     if not records:
         print("  " + t("none"))
         return
     print(text_table(prk_head(), parking_rows(records)))
+
+
+def menu_user_add_vehicle(s):
+    """เพิ่มรถแบบย้อนกลับทีละหน้าจอ: เพิ่มรถ -> ประเภท -> ยี่ห้อ."""
+    member, vehicles = user_vehicles(s)
+    if len(vehicles) >= 1:
+        raise AppError("err_member_vehicle_limit")
+
+    # Screen 1: Add vehicle. Keep the plate so Back from the type screen
+    # returns to this screen instead of jumping all the way to the main menu.
+    while True:
+        print(f"\n=== {t('add_vehicle_title')} ===")
+        plate = ask_plate(blank_ok=True)
+        if not plate:
+            return
+
+        vtype = pick_type()
+        if vtype is None:
+            continue
+
+        # Screen 3: Brand. Back here returns to the vehicle-type screen.
+        brand = pick_brand(vtype=vtype)
+        if brand is None:
+            continue
+
+        vehicle = s.add_vehicle(plate, vtype, brand)
+        try:
+            s.add_member_vehicle(member["member_id"], vehicle["vehicle_id"])
+        except Exception:
+            try:
+                s.delete_vehicle(vehicle["vehicle_id"])
+            except Exception:
+                pass
+            raise
+        generate_report(s)
+        print("  " + t("ok_vehicle_added", id=vehicle["vehicle_id"]))
+        print("  " + t("vehicle_linked_to_member"))
+        return
 
 
 MENU = [("1", "m_add", menu_add), ("2", "m_update", menu_update), ("3", "m_delete", menu_delete),
@@ -1377,7 +1608,11 @@ def register_member(s):
     phone = ask_phone()
     plate = ask_plate()
     vtype = pick_type()
-    brand = pick_brand()
+    if vtype is None:
+        return
+    brand = pick_brand(vtype=vtype)
+    if brand is None:
+        return
 
     # Create the vehicle first because the existing member record stores vehicle_id.
     vehicle = s.add_vehicle(plate, vtype, brand)
@@ -1429,6 +1664,7 @@ def main_loop(s):
             "2": menu_user_entry,
             "3": menu_user_exit,
             "4": menu_user_history,
+            "5": menu_user_add_vehicle,
         }
         while True:
             print(f"\n=== {t('user_title')} ===")
@@ -1436,12 +1672,16 @@ def main_loop(s):
             print(f"2) {t('m_entry')}")
             print(f"3) {t('m_exit_vehicle')}")
             print(f"4) {t('e_parking')}")
-            print(f"5) {t('m_language')}")
-            print(f"0) {t('m_exit')}")
+            print(f"5) {t('add_vehicle_title')}")
+            print(f"6) {t('m_language')}")
+            print(f"0) {t('back')}")
+            print(f"9) {t('m_exit')}")
             choice = ask(t("select"))
             if choice == "0":
                 return False
-            if choice == "5":
+            if choice == "9":
+                return "exit"
+            if choice == "6":
                 return True
             fn = actions.get(choice)
             if not fn:
@@ -1458,10 +1698,13 @@ def main_loop(s):
             for k, key, _ in MENU:
                 print(f"{k}) {t(key)}")
             print(f"{LANG_KEY}) {t('m_language')}")
-            print(f"0) {t('m_exit')}")
+            print(f"0) {t('back')}")
+            print(f"9) {t('m_exit')}")
             choice = ask(t("select"))
             if choice == "0":
                 return False
+            if choice == "9":
+                return "exit"
             if choice == LANG_KEY:
                 return True
             fn = actions.get(choice)
@@ -1475,21 +1718,25 @@ def main_loop(s):
 
 
 def run_interactive(s):
-    while login(s):
-        while main_loop(s):
-            code = choose_language(allow_back=True)
-            if code:
-                set_language(code)
-            else:
-                break
-        # Logout after leaving a role menu; next loop requires login again.
+    while True:
+        if not login(s):
+            break
+        while True:
+            result = main_loop(s)
+            if result == "exit":
+                print(t("goodbye"))
+                return
+            if result is True:
+                code = choose_language(allow_back=True)
+                if code:
+                    set_language(code)
+                # Back from language selection returns to the current role menu.
+                continue
+            # 0 = Back/Logout: return to role selection, not exit the program.
+            break
         global current_role, current_member_id
         current_role, current_member_id = None, None
-        if current_role is None:
-            # Keep the existing simple flow: exit after a completed session.
-            break
     print(t("goodbye"))
-
 
 # --------------------------------------------------------------------------
 # Demo data  (data values themselves are not translated)
@@ -1510,7 +1757,7 @@ def seed(s, n):
         while not plate or plate in used:
             plate = f"{rng.choice(letters)}{rng.choice(letters)}-{rng.randint(1000, 9999)}"
         used.add(plate)
-        vtype = "Car" if rng.random() < 0.7 else "Motorcycle"
+        vtype = "Car"
         vids.append(s.add_vehicle(plate, vtype, rng.choice(brands), now=clock)["vehicle_id"])
     for vid in rng.sample(vids, max(1, n // 5)):
         s.add_member(rng.choice(names), "08" + "".join(rng.choice("0123456789") for _ in range(8)),
@@ -1522,9 +1769,10 @@ def seed(s, n):
             s.leave(parked.pop(rng.randrange(len(parked))), now=clock)
         else:
             vid = rng.choice([v for v in vids if v not in parked])
-            s.enter(vid, slot=rng.choice(s.free_slots()), now=clock)
+            s.enter(vid, slot=None, now=clock)
             parked.append(vid)
-    for vid in rng.sample([v for v in vids if v not in parked], min(3, n // 10)):
+    delete_candidates = [v for v in vids if v not in parked]
+    for vid in rng.sample(delete_candidates, min(3, n // 10, len(delete_candidates))):
         s.delete_vehicle(vid)
     print(t("seed_done", n=n, members=s.members.count, parking=s.parking.count))
 
@@ -1592,6 +1840,8 @@ def main(argv=None):
 
         if args.seed:
             seed(s, args.seed)
+        # สร้าง Report ตั้งแต่เริ่มโปรแกรม เพื่อให้มีข้อมูลล่าสุดเสมอ
+        generate_report(s)
         if interactive:
             run_interactive(s)
     except (KeyboardInterrupt, EOFError):
@@ -1599,7 +1849,8 @@ def main(argv=None):
     finally:
         if s is not None:
             try:
-                print(t("report_written", path=generate_report(s)))
+                paths = generate_report(s)
+                print(t("report_written", path=", ".join(paths)))
             finally:
                 s.close()
     return 0
