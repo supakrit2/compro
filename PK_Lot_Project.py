@@ -65,8 +65,6 @@ VEHICLE_FIELDS = [("vehicle_id", "I"), ("plate", "20s"), ("vehicle_type", "10s")
                   ("brand", "15s"), ("status", "I")]
 MEMBER_FIELDS = [("member_id", "I"), ("name", "30s"), ("phone", "15s"),
                  ("vehicle_id", "I"), ("status", "I")]
-# ความสัมพันธ์สมาชิก-รถ: สมาชิก 1 คนมีรถได้สูงสุด 1 คัน
-MEMBER_VEHICLE_FIELDS = [("link_id", "I"), ("member_id", "I"), ("vehicle_id", "I"), ("status", "I")]
 PARKING_FIELDS = [("parking_id", "I"), ("vehicle_id", "I"), ("slot_no", "I"),
                   ("time_in", "20s"), ("time_out", "20s"), ("fee", "f"), ("status", "I")]
 HISTORY_FIELDS = [("ts", "I"), ("op_code", "I"), ("vehicle_id", "I"), ("slot_no", "I"),
@@ -108,6 +106,7 @@ EN = {
     "ttl_vehicle_type": "Vehicle type",
     "v_single": "Single record",
     "v_all": "All records",
+    "v_combined": "Members + Vehicles together",
     "v_filter": "Filter",
     "v_stats": "Summary statistics",
     "ttl_filter_vehicles": "Filter vehicles by",
@@ -278,7 +277,7 @@ TH = {
     "select": "เลือก: ", "invalid_main": "เลือกไม่ถูกต้อง กรุณาเลือกหมายเลข 0-8",
     "vehicle": "รถ", "member": "สมาชิก", "ttl_which": "ต้องการจัดการข้อมูลประเภทใด",
     "e_vehicles": "ข้อมูลรถ", "e_members": "ข้อมูลสมาชิก", "e_parking": "ประวัติการจอด",
-    "ttl_vehicle_type": "เลือกประเภทรถ", "v_single": "แสดงข้อมูลรายการเดียว", "v_all": "แสดงข้อมูลทั้งหมด",
+    "ttl_vehicle_type": "เลือกประเภทรถ", "v_single": "แสดงข้อมูลรายการเดียว", "v_all": "แสดงข้อมูลทั้งหมด", "v_combined": "แสดงข้อมูลสมาชิกและรถพร้อมกัน",
     "v_filter": "ค้นหาและกรองข้อมูล", "v_stats": "แสดงสถิติ",
     "ttl_filter_vehicles": "กรองข้อมูลรถตาม", "f_type": "ประเภทรถ", "f_brand": "ยี่ห้อที่มีคำว่า",
     "f_parked": "สถานะการจอด", "f_status": "สถานะข้อมูล (ใช้งาน/ลบแล้ว)",
@@ -640,102 +639,48 @@ class ParkingSystem:
         self.report_parking_path = os.path.join(report_dir, "report_parking.txt")
         self.vehicles = Table(p("vehicles.dat"), b"VEHC", VEHICLE_FIELDS, "vehicle_id", 1, True)
         self.members = Table(p("members.dat"), b"MEMB", MEMBER_FIELDS, "member_id", 5001, True)
-        self.member_vehicles = Table(p("member_vehicles.dat"), b"MVEH", MEMBER_VEHICLE_FIELDS, "link_id", 1, True)
         self.parking = Table(p("parking.dat"), b"PARK", PARKING_FIELDS, "parking_id", 1, False)
         self.history = Table(p("history.dat"), b"HIST", HISTORY_FIELDS)
-        self._migrate_primary_vehicle_links()
 
     def close(self):
-        for t_ in (self.vehicles, self.members, self.member_vehicles, self.parking, self.history):
+        for t_ in (self.vehicles, self.members, self.parking, self.history):
             t_.close()
 
-    def _migrate_primary_vehicle_links(self):
-        """สร้าง/ซ่อมความสัมพันธ์จาก members.dat ให้เหลือรถหลัก 1 คันต่อสมาชิก."""
-        # ข้อมูลเก่าอาจมี link ซ้ำหรือมีมากกว่า 1 คันต่อสมาชิก
-        # เก็บ link ที่ใช้งานตัวแรกไว้ และปิด link ที่เกิน/รถซ้ำกับสมาชิกอื่น
-        seen_members = set()
-        seen_vehicles = set()
-        for r in self.member_vehicles.records():
-            if r["status"] != 1:
-                continue
-            mid, vid = r["member_id"], r["vehicle_id"]
-            if mid in seen_members or vid in seen_vehicles:
-                r["status"] = 0
-                self.member_vehicles.update(r)
-            else:
-                try:
-                    self.active_member(mid)
-                    self.active_vehicle(vid)
-                    seen_members.add(mid)
-                    seen_vehicles.add(vid)
-                except AppError:
-                    r["status"] = 0
-                    self.member_vehicles.update(r)
-
-        # เติม link จาก members.dat สำหรับข้อมูลเก่าที่ไม่มี link
-        for m in self.members.records():
-            vid = m.get("vehicle_id", 0)
-            if m["status"] != 1 or not vid or m["member_id"] in seen_members or vid in seen_vehicles:
-                continue
-            try:
-                self.active_vehicle(vid)
-                self.member_vehicles.insert({"link_id": 0, "member_id": m["member_id"], "vehicle_id": vid, "status": 1})
-                seen_members.add(m["member_id"])
-                seen_vehicles.add(vid)
-            except AppError:
-                pass
-
     def member_vehicle_ids(self, mid):
-        """คืนรายการรถของสมาชิก โดยกติกาปัจจุบันคือ 1 สมาชิก = 1 รถ."""
-        ids = []
-        for r in self.member_vehicles.records():
-            if r["status"] == 1 and r["member_id"] == mid and r["vehicle_id"] not in ids:
-                try:
-                    self.active_vehicle(r["vehicle_id"])
-                    ids.append(r["vehicle_id"])
-                except AppError:
-                    pass
+        """คืนรถของสมาชิกจาก members.dat โดยตรง (1 สมาชิก = 1 รถ)."""
         m = self.members.get(mid)
-        if m and m["status"] == 1 and m.get("vehicle_id") and m["vehicle_id"] not in ids:
-            try:
-                self.active_vehicle(m["vehicle_id"])
-                ids.insert(0, m["vehicle_id"])
-            except AppError:
-                pass
-        return ids[:1]
+        if not m or m["status"] != 1:
+            return []
+        vid = m.get("vehicle_id", 0)
+        if not vid:
+            return []
+        try:
+            self.active_vehicle(vid)
+            return [vid]
+        except AppError:
+            return []
 
     def _vehicle_owner(self, vid, exclude_mid=None):
-        """คืน member_id ของเจ้าของรถที่ยัง active ถ้ามี."""
-        for r in self.member_vehicles.records():
-            if r["status"] == 1 and r["vehicle_id"] == vid and r["member_id"] != exclude_mid:
-                try:
-                    self.active_member(r["member_id"])
-                    return r["member_id"]
-                except AppError:
-                    pass
+        """คืน member_id ของเจ้าของรถที่ยัง active จาก members.dat ถ้ามี."""
         for m in self.members.records():
-            if m["status"] == 1 and m.get("vehicle_id") == vid and m["member_id"] != exclude_mid:
+            if (m["status"] == 1 and m.get("vehicle_id") == vid
+                    and m["member_id"] != exclude_mid):
                 return m["member_id"]
         return None
 
-    def _deactivate_member_links(self, mid, keep_vid=None):
-        for r in self.member_vehicles.records():
-            if r["status"] == 1 and r["member_id"] == mid and (keep_vid is None or r["vehicle_id"] != keep_vid):
-                r["status"] = 0
-                self.member_vehicles.update(r)
-
     def add_member_vehicle(self, mid, vid):
-        self.active_member(mid)
+        """กำหนดรถให้สมาชิกใน members.dat โดยตรง; สมาชิกหนึ่งคนมีได้ 1 คัน."""
+        rec = self.active_member(mid)
         self.active_vehicle(vid)
-        ids = self.member_vehicle_ids(mid)
-        if vid in ids:
-            return
-        if ids:
+        old_vid = rec.get("vehicle_id", 0)
+        if old_vid and old_vid != vid:
             raise AppError("err_member_vehicle_limit")
         owner = self._vehicle_owner(vid, exclude_mid=mid)
         if owner is not None:
             raise AppError("err_vehicle_already_owned", id=vid, member=owner)
-        self.member_vehicles.insert({"link_id": 0, "member_id": mid, "vehicle_id": vid, "status": 1})
+        if old_vid != vid:
+            rec["vehicle_id"] = vid
+            self.members.update(rec)
 
     def _log(self, op, vid=0, slot=0, status=0, parked=0, fee=0.0, now=None):
         now = now or datetime.now()
@@ -814,10 +759,6 @@ class ParkingSystem:
         if vid in self.parked_map():
             raise AppError("err_vehicle_parked_delete")
         self.vehicles.delete(vid)
-        for r in self.member_vehicles.records():
-            if r["status"] == 1 and r["vehicle_id"] == vid:
-                r["status"] = 0
-                self.member_vehicles.update(r)
         for m in self.members.records():
             if m["status"] == 1 and m.get("vehicle_id") == vid:
                 m["vehicle_id"] = 0
@@ -839,11 +780,6 @@ class ParkingSystem:
             raise AppError("err_vehicle_already_owned", id=vid, member=self._vehicle_owner(vid))
         rec = self.members.insert({"member_id": 0, "name": name, "phone": phone,
                                    "vehicle_id": vid, "status": 1})
-        try:
-            self.add_member_vehicle(rec["member_id"], vid)
-        except Exception:
-            self.members.delete(rec["member_id"])
-            raise
         self._log(OP_ADD, vid, 0, 1, 1 if vid in self.parked_map() else 0, 0.0, now)
         return rec
 
@@ -861,15 +797,12 @@ class ParkingSystem:
             rec["phone"] = phone
         rec["vehicle_id"] = new_vid
         self.members.update(rec)
-        self._deactivate_member_links(mid, keep_vid=new_vid)
-        self.add_member_vehicle(mid, new_vid)
         self._log(OP_UPDATE, new_vid, 0, 1, 1 if new_vid in self.parked_map() else 0)
         return rec
 
     def delete_member(self, mid):
         rec = self.active_member(mid)
         self.members.delete(mid)
-        self._deactivate_member_links(mid)
         self._log(OP_DELETE, rec["vehicle_id"], 0, 0, 0)
 
     # ---- parking ----
@@ -947,6 +880,32 @@ def prk_head():
             t("col_time_out"), t("col_fee"), t("col_status")]
 
 
+def combined_head():
+    return [t("col_member_id"), t("col_name"), t("col_phone"), t("col_vehicle_id"),
+            t("col_plate"), t("col_type"), t("col_brand"), t("col_slot"), t("col_status")]
+
+
+def combined_rows(s):
+    """แสดงสมาชิกและรถที่ผูกกันในตารางเดียว โดยใช้ members.dat เป็นตัวอ้างอิงความสัมพันธ์"""
+    parked = s.parked_map()
+    vehicles = {v["vehicle_id"]: v for v in s.vehicles.records()}
+    rows = []
+    for m in s.members.records():
+        vid = m.get("vehicle_id", 0)
+        v = vehicles.get(vid) if vid else None
+        p = parked.get(vid) if v and v["status"] == 1 else None
+        rows.append([
+            m["member_id"], m["name"], m["phone"],
+            vid if vid else "-",
+            v["plate"] if v else "-",
+            type_label(v["vehicle_type"]) if v else "-",
+            v["brand"] if v else "-",
+            p["slot_no"] if p else "-",
+            status_label(m["status"])
+        ])
+    return rows
+
+
 def status_label(v):
     return t("status_active") if v == 1 else t("status_deleted")
 
@@ -977,13 +936,18 @@ def vehicle_rows(vehicles, parked):
     return rows
 
 
-def member_rows(members):
-    return [[m["member_id"], m["name"], m["phone"], m["vehicle_id"], status_label(m["status"])]
-            for m in members]
+def member_rows(s, members):
+    """แสดงข้อมูลสมาชิกโดยใช้ vehicle_id จาก members.dat โดยตรง"""
+    rows = []
+    for m in members:
+        ids = s.member_vehicle_ids(m["member_id"])
+        vehicle_id = ids[0] if ids else "-"
+        rows.append([m["member_id"], m["name"], m["phone"], vehicle_id, status_label(m["status"])])
+    return rows
 
 
 def member_report_rows(s, members):
-    """แสดงรถของสมาชิกทุกคัน โดยรองรับรถ 1 คัน"""
+    """แสดงรถของสมาชิกจาก members.dat (1 สมาชิก = 1 รถ)"""
     rows = []
     for m in members:
         ids = s.member_vehicle_ids(m["member_id"])
@@ -1359,7 +1323,7 @@ def view_single(s):
         rec = s.members.get(rid)
         if not rec:
             raise AppError("err_member_not_found", id=rid)
-        print(text_table(mem_head(), member_rows([rec])))
+        print(text_table(mem_head(), member_rows(s, [rec])))
     else:
         rec = s.parking.get(rid)
         if not rec:
@@ -1372,7 +1336,7 @@ def view_all(s):
     if e == "vehicle":
         print(text_table(veh_head(), vehicle_rows(s.vehicles.records(), s.parked_map())))
     elif e == "member":
-        print(text_table(mem_head(), member_rows(s.members.records())))
+        print(text_table(mem_head(), member_rows(s, s.members.records())))
     elif e == "parking":
         print(text_table(prk_head(), parking_rows(s.parking.records())))
 
@@ -1402,7 +1366,7 @@ def view_filter(s):
     elif e == "member":
         want = ask_yes_no(t("q_active_members"))
         recs = [m for m in s.members.records() if (m["status"] == 1) == want]
-        print(text_table(mem_head(), member_rows(recs)))
+        print(text_table(mem_head(), member_rows(s, recs)))
     elif e == "parking":
         c = choose(t("ttl_filter_parking"), [t("f_parked"), t("f_completed"), t("f_vehicle_id")])
         recs = s.parking.records()
@@ -1423,10 +1387,14 @@ def view_stats(s):
     print(build_report(s, datetime.now().astimezone(), with_table=False, with_header=False))
 
 
+def view_combined(s):
+    print(text_table(combined_head(), combined_rows(s)))
+
+
 def menu_view(s):
-    actions = [view_single, view_all, view_filter, view_stats]
+    actions = [view_single, view_all, view_combined, view_filter, view_stats]
     while True:
-        c = choose(t("m_view"), [t("v_single"), t("v_all"), t("v_filter"), t("v_stats")])
+        c = choose(t("m_view"), [t("v_single"), t("v_all"), t("v_combined"), t("v_filter"), t("v_stats")])
         if c == 0:
             return
         try:
@@ -1500,7 +1468,7 @@ def menu_user_view(s):
     member, vehicles = user_vehicles(s)
     if not vehicles:
         raise AppError("user_no_vehicle")
-    print(text_table(mem_head(), member_rows([member])))
+    print(text_table(mem_head(), member_rows(s, [member])))
     print("\n" + t("my_vehicles_title"))
     print(text_table(veh_head(), vehicle_rows(vehicles, s.parked_map())))
     for vehicle in vehicles:
